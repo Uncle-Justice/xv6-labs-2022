@@ -70,14 +70,38 @@ sys_sleep(void)
 }
 
 
-#ifdef LAB_PGTBL
+// #ifdef LAB_PGTBL
 int
 sys_pgaccess(void)
 {
-  // lab pgtbl: your code here.
+  uint64 starting_addr;
+  int page_num;
+  uint64 bitmask_addr;
+  argaddr(0, &starting_addr);
+  argint(1, &page_num);
+  argaddr(2, &bitmask_addr);
+  pte_t *pte;
+  uint64 bitmask = 0;
+
+  // 设置page_num上限
+  if(page_num > 32)
+    panic("sys_pgaccess page_num too high");
+  // 循环walk，拿到每一个虚拟地址对应的物理地址，然后判断access_bit
+  for(int i = 0; i < page_num; i++){
+    // 不知道是不是+i
+    pte = walk(myproc()->pagetable, starting_addr + i * PGSIZE, 0);
+    // 判断pte的access位，如果被访问了，该位重置，并在bitmask中设置
+    if((*pte & PTE_A) != 0){
+      *pte ^=  PTE_A;
+      bitmask |= (1L<< i);
+    }
+  }
+  // 返回结果
+  if(copyout(myproc()->pagetable, bitmask_addr, (char *)&bitmask, sizeof(bitmask)) < 0)
+      return -1;
   return 0;
 }
-#endif
+// #endif
 
 uint64
 sys_kill(void)
