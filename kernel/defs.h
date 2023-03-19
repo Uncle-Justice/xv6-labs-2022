@@ -63,7 +63,15 @@ void            ramdiskrw(struct buf*);
 void*           kalloc(void);
 void            kfree(void *);
 void            kinit(void);
+int               paref(uint64);
+int               paunref(uint64);
+int               parefnum(uint64);
+int uvmtrapcopy(pagetable_t pagetable,uint64 va,uint64 sz);
+void *kcopy_and_unref(uint64 pa);
+int uvmtrapcopy(pagetable_t pagetable,uint64 va,uint64 sz);
 
+int uvmcowcopy(pagetable_t pagetable,pte_t * pte,uint64 va);
+uint64 uvmcowtrapcopy(uint64 va, pagetable_t pagetable);
 // log.c
 void            initlog(int, struct superblock*);
 void            log_write(struct buf*);

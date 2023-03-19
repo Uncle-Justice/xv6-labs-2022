@@ -308,23 +308,35 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
+  // char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
+    // i是虚拟地址，拿到pte
     if((pte = walk(old, i, 0)) == 0)
+      // continue;
       panic("uvmcopy: pte should exist");
     if((*pte & PTE_V) == 0)
+      // continue;
       panic("uvmcopy: page not present");
+    *pte &= (~PTE_W);
+    *pte |= PTE_COW;
+    // pa是pte的物理地址
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
+    // 下面三行的工作是分配一个新页，并把旧进程的页内容复制过去
+    // if((mem = kalloc()) == 0)
+    //   goto err;
+    // memmove(mem, (char*)pa, PGSIZE);
+    
+    // fork的时候会把这个pte的10位flag也拷贝过去，所以不用再改一次PTE_W和PTE_COW
+    if(mappages(new, i, PGSIZE, (uint64)pa, flags) != 0){
+      kfree((char *)pa);
       goto err;
     }
+
+    paref(pa);
   }
+
   return 0;
 
  err:
@@ -352,12 +364,21 @@ int
 copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
   uint64 n, va0, pa0;
-
+  uint64 mem;
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
     pa0 = walkaddr(pagetable, va0);
     if(pa0 == 0)
       return -1;
+    pte_t *pte=walk(pagetable,va0,0);
+    if(pte==0){
+      return -1;
+    }
+        //复制一个新页，然后进行写入操作
+    if(*pte&PTE_COW){
+      mem=(uint64)uvmcowtrapcopy(va0, pagetable);
+      pa0=(uint64)mem;
+    }
     n = PGSIZE - (dstva - va0);
     if(n > len)
       n = len;
