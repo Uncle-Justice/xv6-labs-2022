@@ -102,6 +102,29 @@ e1000_transmit(struct mbuf *m)
   // the TX descriptor ring so that the e1000 sends it. Stash
   // a pointer so that it can be freed after sending.
   //
+
+  acquire(&e1000_lock);
+  uint32 bufindex=regs[E1000_TDT];
+  struct tx_desc *desc=&tx_ring[bufindex];
+  //该packet已经发送完了
+  if(!(desc->status&E1000_TXD_STAT_DD)){
+    release(&e1000_lock);
+    return -1;
+  }
+  //如果该mbuf还未释放，则释放掉
+  if(tx_mbufs[bufindex]){
+    mbuffree(tx_mbufs[bufindex]);
+    tx_mbufs[bufindex]=0;
+  }
+  desc->addr=(uint64)m->head;
+  desc->length=m->len;
+  //该packet是完整的
+  desc->cmd=E1000_TXD_CMD_EOP | E1000_TXD_CMD_RS;
+  tx_mbufs[bufindex]=m;
+
+  regs[E1000_TDT]=(regs[E1000_TDT]+1)%TX_RING_SIZE;
+
+  release(&e1000_lock);
   
   return 0;
 }
@@ -115,6 +138,28 @@ e1000_recv(void)
   // Check for packets that have arrived from the e1000
   // Create and deliver an mbuf for each packet (using net_rx()).
   //
+  while(1){
+  uint32 next_packet_index  = (regs[E1000_RDT]+1)%RX_RING_SIZE;
+  
+  if(!(rx_ring[next_packet_index].status & E1000_RXD_STAT_DD)){
+    // panic("hasn't finished the corresponding previous transmission request\n");
+    return;
+  }
+  rx_mbufs[next_packet_index]->len =  rx_ring[next_packet_index].length;
+  net_rx(rx_mbufs[next_packet_index]);
+
+  struct mbuf *m;
+
+  m = mbufalloc(0);
+  if (!m){
+    panic("e1000_recv");
+    return;
+  }
+  rx_mbufs[next_packet_index] = m;
+  rx_ring[next_packet_index].addr=(uint64)rx_mbufs[next_packet_index]->head;
+  rx_ring[next_packet_index].status=0;
+  regs[E1000_RDT]=next_packet_index;
+  }
 }
 
 void
