@@ -110,7 +110,8 @@ testsymlink(void)
   if(r) fail("Failed to link 3->4");
 
   close(fd1);
-  close(fd2);
+  // fd1和fd2应该都指向了那个ref=0的inode，所以不应该close两次
+  // close(fd2);
 
   fd1 = open("/testsymlink/4", O_CREATE | O_RDWR);
   if(fd1<0) fail("Failed to create 4\n");

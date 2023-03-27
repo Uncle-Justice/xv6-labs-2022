@@ -15,7 +15,7 @@
 #include "sleeplock.h"
 #include "file.h"
 #include "fcntl.h"
-
+#define MAXFOLLOWDEPTH 10
 // Fetch the nth word-sized system call argument as a file descriptor
 // and return both the descriptor and the corresponding struct file.
 static int
@@ -99,11 +99,12 @@ sys_close(void)
 {
   int fd;
   struct file *f;
-
+  // printf("sys_close start\n");
   if(argfd(0, &fd, &f) < 0)
     return -1;
   myproc()->ofile[fd] = 0;
   fileclose(f);
+  // printf("sys_close finish\n");
   return 0;
 }
 
@@ -247,13 +248,14 @@ create(char *path, short type, short major, short minor)
 {
   struct inode *ip, *dp;
   char name[DIRSIZ];
-
+  // printf("create path: %s\n",path);
   if((dp = nameiparent(path, name)) == 0)
     return 0;
 
   ilock(dp);
 
   if((ip = dirlookup(dp, name, 0)) != 0){
+    // printf("create but ip already exist: %s\n", name);
     iunlockput(dp);
     ilock(ip);
     if(type == T_FILE && (ip->type == T_FILE || ip->type == T_DEVICE))
@@ -270,6 +272,7 @@ create(char *path, short type, short major, short minor)
   ilock(ip);
   ip->major = major;
   ip->minor = minor;
+  // printf("create ip->ref: %d\n",ip->ref);
   ip->nlink = 1;
   iupdate(ip);
 
@@ -315,7 +318,7 @@ sys_open(void)
     return -1;
 
   begin_op();
-
+  // printf("open %s\n", path);
   if(omode & O_CREATE){
     ip = create(path, T_FILE, 0, 0);
     if(ip == 0){
@@ -335,12 +338,45 @@ sys_open(void)
     }
   }
 
+  // 本题不涉及到open一个device，所以这里就没写具体怎么处理 
   if(ip->type == T_DEVICE && (ip->major < 0 || ip->major >= NDEV)){
     iunlockput(ip);
     end_op();
     return -1;
   }
-
+  /** 符号链接业务流程 */
+ if(ip->type==T_SYMLINK && (omode & O_NOFOLLOW)==0) {
+      int count=0;
+      char symlinkpath[MAXPATH];
+      while(1){
+        // printf("###ip->ref: %d, ip->nlink:%d\n", ip->ref,ip->nlink);
+        // printf("count: %d\n", count);
+        if(count>10){
+          iunlockput(ip);
+          end_op();
+          // printf("ip->nlink:%d\n", ip->nlink);
+          return -1;
+        }
+        
+        if(readi(ip,0,(uint64)symlinkpath, 0, MAXPATH)>MAXPATH){
+          // printf("%s\n", symlinkpath);
+          return -1;
+          panic("symlink");
+        }
+        iunlockput(ip);
+        // printf("symlinkpath: %s\n", symlinkpath);
+        if((ip=namei(symlinkpath))==0){
+          end_op();
+          // printf("symlink namei fail: %s\n", symlinkpath);
+          return -1;
+        }
+        ilock(ip);
+        if(ip->type!=T_SYMLINK){
+          break;
+        }
+        count++;
+      }
+}
   if((f = filealloc()) == 0 || (fd = fdalloc(f)) < 0){
     if(f)
       fileclose(f);
@@ -363,10 +399,10 @@ sys_open(void)
   if((omode & O_TRUNC) && ip->type == T_FILE){
     itrunc(ip);
   }
-
+  // printf("ip->ref: %d, ip->nlink:%d\n", ip->ref,ip->nlink);
   iunlock(ip);
   end_op();
-
+  // printf("\n");
   return fd;
 }
 
@@ -501,5 +537,38 @@ sys_pipe(void)
     fileclose(wf);
     return -1;
   }
+  return 0;
+}
+
+uint64
+sys_symlink(void){
+  struct inode *ip;
+  // int ret;
+  char target[MAXPATH], path[MAXPATH];
+  // 读取用户参数
+  argstr(0, target, MAXPATH) ;
+  argstr(1, path, MAXPATH) ;
+
+  begin_op();
+
+  // 创建返回的是inode
+  ip = create(path, T_SYMLINK, 0, 0);
+  if(ip == 0){
+    end_op();
+    return -1;
+  }
+
+  // use the first data block to store target path.
+  // writei实际上只写了log，真正落盘要commit之后，也就是end_op
+  if(writei(ip, 0, (uint64)target, 0, strlen(target)) < 0) {
+    
+    end_op();
+    return -1;
+  }
+  // printf("symlink: target: %s\n", target);
+  
+  iunlockput(ip);
+  end_op();
+  // printf("\n");
   return 0;
 }

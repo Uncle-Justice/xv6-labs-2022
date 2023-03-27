@@ -60,7 +60,7 @@ void
 fileclose(struct file *f)
 {
   struct file ff;
-
+  // printf("fileclose begin: ref: %d\n",f->ref);
   acquire(&ftable.lock);
   if(f->ref < 1)
     panic("fileclose");
@@ -76,10 +76,15 @@ fileclose(struct file *f)
   if(ff.type == FD_PIPE){
     pipeclose(ff.pipe, ff.writable);
   } else if(ff.type == FD_INODE || ff.type == FD_DEVICE){
+    // printf("file close1\n");
     begin_op();
+    // printf("file close2\n");
     iput(ff.ip);
+    // printf("file close3\n");
     end_op();
+    // printf("file close4\n");
   }
+  // printf("fileclose finish\n");
 }
 
 // Get metadata about file f.
