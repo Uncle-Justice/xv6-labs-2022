@@ -5,7 +5,11 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
-
+#include "fcntl.h"
+#include "spinlock.h"
+#include "sleeplock.h"
+#include "file.h"
+#include "proc.h"
 /*
  * the kernel's page table.
  */
@@ -167,6 +171,9 @@ mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
 // Remove npages of mappings starting from va. va must be
 // page-aligned. The mappings must exist.
 // Optionally free the physical memory.
+// 整体改为lazy allocation模式，导致在unmap的时候有可能遇到无效的pa，
+// 因为之前就没分配，等着发生缺页中断的时候，让handler去给分配空间
+// 这里的continue只出现在unmap以及uvmcopy里，别的地方要是walk出无效的pte还是要报错的
 void
 uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
 {
@@ -178,11 +185,17 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
 
   for(a = va; a < va + npages*PGSIZE; a += PGSIZE){
     if((pte = walk(pagetable, a, 0)) == 0)
-      panic("uvmunmap: walk");
+      // 在unmap的时候遇到，某个pa无效，就直接跳过，因为有可能之前就因为lazy allocation然后就没给他分配
+      continue;
+      // panic("uvmunmap: walk");
     if((*pte & PTE_V) == 0)
-      panic("uvmunmap: not mapped");
+      // 在unmap的时候遇到，某个pa无效，就直接跳过，因为有可能之前就因为lazy allocation然后就没给他分配
+      continue;
+      // panic("uvmunmap: not mapped");
     if(PTE_FLAGS(*pte) == PTE_V)
-      panic("uvmunmap: not a leaf");
+      // 在unmap的时候遇到，某个pa无效，就直接跳过，因为有可能之前就因为lazy allocation然后就没给他分配
+      continue;
+      // panic("uvmunmap: not a leaf");
     if(do_free){
       uint64 pa = PTE2PA(*pte);
       kfree((void*)pa);
@@ -314,7 +327,9 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
     if((pte = walk(old, i, 0)) == 0)
       panic("uvmcopy: pte should exist");
     if((*pte & PTE_V) == 0)
-      panic("uvmcopy: page not present");
+    // 由于lazyallocation，这里应该从panic改成continue
+      continue;
+      // panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
     if((mem = kalloc()) == 0)
@@ -436,4 +451,111 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   } else {
     return -1;
   }
+}
+int vm_exists(pagetable_t pagetable, uint64 va){
+  pte_t *pte;
+  return (pte=walk(pagetable,va,0)) && (*pte & PTE_V);
+}
+int
+munmap_writeback(uint64 unstart, uint64 unlen, uint64 start, uint64 offset, struct vma *a){
+  // 感觉有点乱，八成有问题
+  struct file *f = a->f;
+  uint off = unstart - start + offset;
+  uint size;
+
+  ilock(f->ip);
+  size = f->ip->size;
+  iunlock(f->ip);
+
+  if(off >= size) return -1;
+
+  uint n = unlen < size - off ? unlen : size - off;
+
+  int r, ret = 0;
+  int max = ((MAXOPBLOCKS-1-1-2) / 2) * BSIZE;
+  int i = 0;
+  while(i < n){
+    int n1 = n - i;
+    if(n1 > max)
+      n1 = max;
+
+    begin_op();
+    ilock(f->ip);
+    r = writei(f->ip, 1, unstart, off + i, n1);
+    iunlock(f->ip);
+    end_op();
+
+    if(r != n1){
+      // error from writei
+      break;
+    }
+    i += r;
+  }
+  ret = (i == n ? n : -1);
+
+  return ret;
+}
+int munmap(uint64 addr, int len){
+  struct proc *my_proc = myproc();
+  struct vma *unmap_vma = 0;
+
+  // 这个地址所在的页的页号，一般我们把页号搞成这种形式，用户自己要求的某个地址很可能不是正好是页号那个地址
+  // 但是一般系统自己存的，比如vma->addr，就会默认一直保持是页号的形式
+  addr = PGROUNDDOWN(addr); 
+
+  for(int i = 0; i < MAXVMAPERPROC; i++){
+    if(my_proc->pvma[i].valid && addr >= my_proc->pvma[i].addr && addr < my_proc->pvma[i].addr+my_proc->pvma[i].len){
+      unmap_vma = &my_proc->pvma[i];
+      break;
+    }
+  }
+
+  if (unmap_vma == 0) return -1;
+
+  // unmap的时候也是以页的单位来处理的，但是有可能传进来的addr和len都不是页的整数倍
+  // 导致实际处理的时候，起点start_addr和len会有变化
+  // 分了三种情况，不过变量取的有点混乱，说白了就是释放左边，右边还是全部
+  uint64 unmap_start, unmap_len; // [unmap_start, unmap_start + unmap_len]范围内的空间要被unmap掉
+  uint64 ori_vma_start_addr = unmap_vma->addr, ori_vma_offset = unmap_vma->offset, ori_vma_len = unmap_vma->len;
+  if(addr == unmap_vma->addr){
+    // 1. 我想unmap的字节级起点正好就是vma里的起点，那么我要unmap的页级起点为addr的页号
+    unmap_start = addr;
+    unmap_len = PGROUNDUP(len) < unmap_vma->len ? PGROUNDUP(len) : unmap_vma->len;
+
+    // 因为被unmap了一些，所以vma里的数据也要做相应的修改
+    unmap_vma->addr = unmap_start + unmap_len; 
+    unmap_vma->len = ori_vma_start_addr+ori_vma_len - unmap_vma->addr;
+    unmap_vma->offset = unmap_vma->offset + unmap_len;
+  } else if(addr + len >= ori_vma_start_addr+ori_vma_len){
+    // 2. 我想unmap的起点大于vma里的起点，同时想unmap的len还超过用户空间里已有的最大len，那么不报错，只unmap到目前的最大范围
+    // 要unmap的页级起点为addr的页号
+    // 这个情况里，unmap_vma->addr是不变的     
+    unmap_start =PGROUNDDOWN(addr);
+    unmap_len = ori_vma_start_addr + ori_vma_len - unmap_start;
+
+    unmap_vma->len = unmap_start - ori_vma_start_addr;
+  } else{
+    // 3. 其他情况，直接把vma里的所有页都unmap掉
+    unmap_start = ori_vma_start_addr;
+    unmap_len = ori_vma_len;
+  }
+
+  for(int i = 0; i < unmap_len / PGSIZE; i++){
+    uint64 va = unmap_start + i * PGSIZE;
+    // 由于改用了lazy alloccation的方式，所以有可能在unmap里，要写回的时候才发现这页根本不存在
+    // 所以只在这个va有实际的物理内存地址的时候才有可能对这页进行写回
+    if(vm_exists(my_proc->pagetable, va)){
+      if(unmap_vma->flags & MAP_SHARED){
+        munmap_writeback(va, PGSIZE, ori_vma_start_addr, ori_vma_offset, unmap_vma);
+      }
+
+      uvmunmap(my_proc->pagetable, va, 1, 1);
+    }
+  }
+
+  if(unmap_len == ori_vma_len){
+    fileclose(unmap_vma->f);
+    unmap_vma->valid = 0;
+  }
+  return 0;
 }

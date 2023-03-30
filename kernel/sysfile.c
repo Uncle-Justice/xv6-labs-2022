@@ -503,3 +503,55 @@ sys_pipe(void)
   }
   return 0;
 }
+
+uint64
+sys_mmap(void)
+{
+  // mmap(void *addr,int len,int prot,int flags,int fd,int offset);
+  uint64 addr;
+  int len, prot, flags, fd, offset;
+  argaddr(0, &addr);
+  argint(1, &len);
+  argint(2, &prot);
+  argint(3, &flags);
+  argint(4, &fd);
+  argint(5, &offset);
+  struct proc *p = myproc();
+  struct file *f = p->ofile[fd];
+  if(f == 0){
+    return -1;
+  }
+  if((flags & MAP_SHARED) && !f->writable && (prot & PROT_WRITE))
+    return -1;
+  struct vma *pvma=p->pvma;
+  for(int i=0; i < MAXVMAPERPROC; i++){
+    if(!pvma[i].valid){
+      // printf("mmap: file.ref[%d]\n",f->ref);
+      pvma[i].f=filedup(f); // 调用这个函数而不是直接赋值，是因为要给这个f的ref加一
+      pvma[i].addr=p->sz; // why？
+      pvma[i].len=PGROUNDUP(len); // why？
+      pvma[i].prot=prot;
+      pvma[i].flags=flags;
+      pvma[i].offset=offset;
+      pvma[i].valid=1;
+      p->sz+=len;
+      // printf("mmap: ref[%d], inode.ref[%d]\n",f->ref,f->ip->ref);
+      return pvma[i].addr;
+    }
+  } 
+  return -1;
+  return 0;
+}
+
+// 入参：addr：我想要unmap掉的页的起始地址，len：我想要unmap掉的连续字节的数量
+uint64
+sys_munmap(void)
+{
+  uint64 addr;
+  int len;
+  argaddr(0, &addr);
+  argint(1, &len);
+
+  return munmap(addr,  len);
+
+}

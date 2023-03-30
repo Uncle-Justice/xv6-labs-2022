@@ -22,7 +22,8 @@ int getpid(void);
 char* sbrk(int);
 int sleep(int);
 int uptime(void);
-
+void* mmap(void *addr,int len,int prot,int flags,int fd,int offset); // addr默认就是0，和这个函数返回的addr是两回事
+int munmap(void *addr,int len);
 // ulib.c
 int stat(const char*, struct stat*);
 char* strcpy(char*, const char*);

@@ -25,7 +25,7 @@ struct cpu {
   int noff;                   // Depth of push_off() nesting.
   int intena;                 // Were interrupts enabled before push_off()?
 };
-
+#define MAXVMAPERPROC 16
 extern struct cpu cpus[NCPU];
 
 // per-process data for the trap handling code in trampoline.S.
@@ -81,6 +81,16 @@ struct trapframe {
 
 enum procstate { UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
+struct vma{
+  int valid; // valid就是用来看这个vma现在是不是有效的，还是空的
+  uint64 addr; // 在用户地址空间的起始地址，一般就是一个页的最低地址，相当于页号
+  uint len; // 文件当前实际占据用户地址空间的字节数，这里存的时候会按页向上取整
+  struct file *f; // 实际的文件在磁盘的位置，要靠f来记录
+  uint offset; // 进程访问文件时的指针，以字节为单位，我要读哪，这个offset就要移动到哪个位置
+  uint flags; // 有两种，MAP_PRIVATE不会更新到磁盘，MAP_SHARED会更新到磁盘
+  uint prot; // 访问权限，有NONE，READ，WRITE，EXEC
+};
+
 // Per-process state
 struct proc {
   struct spinlock lock;
@@ -104,4 +114,5 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+  struct vma pvma[MAXVMAPERPROC];
 };

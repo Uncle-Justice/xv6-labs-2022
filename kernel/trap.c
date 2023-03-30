@@ -5,7 +5,10 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
-
+#include "fcntl.h"
+#include "sleeplock.h"
+#include "fs.h"
+#include "file.h"
 struct spinlock tickslock;
 uint ticks;
 
@@ -28,6 +31,46 @@ trapinithart(void)
 {
   w_stvec((uint64)kernelvec);
 }
+
+// 核心在于：发生了缺页，那就把那一页取到用户地址空间里
+// 1. 根据缺页地址找到对应的vma结构体
+// 2. 为va在内存物理空间分配一页空间，得到该空间的地址pa 
+// 3. 在页表中建立虚拟地址va到物理地址pa的映射
+// 4. 通过结构体f->ip，也就是inode指针来读取到磁盘上那一页的内容，然后写进pa里
+int mmap_pgfault_handler(uint64 va){
+  uint64 page_num = PGROUNDDOWN(va);
+  struct proc *my_proc = myproc();
+  struct vma *pgfault_vma = 0;
+  for(int i = 0; i < MAXVMAPERPROC; i++){
+    if(my_proc->pvma[i].valid == 1 && page_num >= my_proc->pvma[i].valid 
+    && page_num < my_proc->pvma[i].addr + my_proc->pvma[i].len){
+      pgfault_vma = &my_proc->pvma[i];
+      break;
+    }
+  }
+  if(pgfault_vma == 0){
+    return -1; 
+  }
+  uint64 pa = (uint64)kalloc();
+  if(pa == 0)
+    return -1;
+  memset((void*)pa, 0, PGSIZE);
+  int flag = PTE_U;
+  flag |= pgfault_vma->prot & PROT_READ ? PTE_R : 0;
+  flag |= pgfault_vma->prot & PROT_WRITE ? PTE_W : 0;
+  if(mappages(my_proc->pagetable, page_num, PGSIZE, pa, flag)!=0){
+    kfree((void *) pa);
+    return -1;
+  }
+  ilock(pgfault_vma->f->ip);
+  printf("trap: va[%p]\n",va);
+  if(readi(pgfault_vma->f->ip, 0,  pa, pgfault_vma->offset+page_num-pgfault_vma->addr, PGSIZE) <= 0){
+    iunlock(pgfault_vma->f->ip);
+  }
+  iunlock(pgfault_vma->f->ip);
+  return 0;
+}
+
 
 //
 // handle an interrupt, exception, or system call from user space.
@@ -67,7 +110,16 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
-  } else {
+  } else if(r_scause() == 13 || r_scause() ==15){
+    
+    uint64 va = r_stval(); // 缺页地址，文件在进程地址空间中的地址
+    if(mmap_pgfault_handler(va)!=0){
+      printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
+      printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
+      p->killed = 1;
+    }
+  }
+   else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     setkilled(p);

@@ -312,6 +312,13 @@ fork(void)
 
   pid = np->pid;
 
+  for(int i = 0; i < MAXVMAPERPROC; i++){
+    if(p->pvma[i].valid == 1){
+      np->pvma[i]=p->pvma[i];
+      filedup(np->pvma[i].f);
+    }
+  } 
+
   release(&np->lock);
 
   acquire(&wait_lock);
@@ -359,7 +366,13 @@ exit(int status)
       p->ofile[fd] = 0;
     }
   }
-
+  
+  for(int i=0;i< MAXVMAPERPROC;i++){
+    if(p->pvma[i].valid){
+      munmap((p->pvma[i].addr), p->pvma[i].len);
+      p->pvma[i].valid=0;
+    }
+  } 
   begin_op();
   iput(p->cwd);
   end_op();
